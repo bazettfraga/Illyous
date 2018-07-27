@@ -6,31 +6,34 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Discord;
 using Discord.Commands;
+using ImageSharp;
 using NadekoBot.Common;
 using NadekoBot.Common.Attributes;
 using NadekoBot.Core.Services;
 using NadekoBot.Extensions;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using Image = SixLabors.ImageSharp.Image;
+using Image = ImageSharp.Image;
 
 namespace NadekoBot.Modules.Gambling
 {
     public partial class Gambling
     {
         [Group]
-        public class DiceRollCommands : NadekoSubmodule
+        public class DriceRollCommands : NadekoSubmodule
         {
-            private static readonly Regex dndRegex = new Regex(@"^(?<n1>\d+)d(?<n2>\d+)(?:\+(?<add>\d+))?(?:\-(?<sub>\d+))?$", RegexOptions.Compiled);
-            private static readonly Regex fudgeRegex = new Regex(@"^(?<n1>\d+)d(?:F|f)$", RegexOptions.Compiled);
+			private readonly Regex dndRegex  = new Regex(@"^(?<n1>\d+)d(?<n2>\d+)?(?:\+(?<add>\d+))?(?:\-(?<sub>\d+))?(?:\*(?<mul>\d+))?$", RegexOptions.Compiled);
+            
 
-            private static readonly char[] _fateRolls = { '-', ' ', '+' };
+
+			private readonly Regex fudgeRegex  = new Regex(@"^(?<n1>\d+)d(?:F|f)$", RegexOptions.Compiled);
+
+            private readonly char[] _fateRolls = { '-', ' ', '+', '*' };
             private readonly IImageCache _images;
 
-            public DiceRollCommands(IDataCache data)
+            public DriceRollCommands(IDataCache data)
             {
                 _images = data.LocalImages;
             }
+
 
             [NadekoCommand, Usage, Description, Aliases]
             public async Task Roll()
@@ -40,16 +43,17 @@ namespace NadekoBot.Modules.Gambling
 
                 var num1 = gen / 10;
                 var num2 = gen % 10;
-
-                using (var img1 = GetDice(num1))
-                using (var img2 = GetDice(num2))
-                using (var img = new[] { img1, img2 }.Merge())
-                using (var ms = img.ToStream())
+                var imageStream = await Task.Run(() =>
                 {
-                    await Context.Channel.SendFileAsync(ms,
-                        "dice.png",
-                        Context.User.Mention + " " + GetText("dice_rolled", Format.Code(gen.ToString()))).ConfigureAwait(false);
-                }
+                    var ms = new MemoryStream();
+                    new[] { GetDice(num1), GetDice(num2) }.Merge().SaveAsPng(ms);
+                    ms.Position = 0;
+                    return ms;
+                }).ConfigureAwait(false);
+
+                await Context.Channel.SendFileAsync(imageStream, 
+                    "dice.png", 
+                    Context.User.Mention + " " + GetText("dice_rolled", Format.Code(gen.ToString()))).ConfigureAwait(false);
             }
 
             public enum RollOrderType
@@ -66,12 +70,27 @@ namespace NadekoBot.Modules.Gambling
             }
 
 
+
             [NadekoCommand, Usage, Description, Aliases]
             [Priority(1)]
             public async Task Rolluo(int num = 1)
             {
                 await InternalRoll(num, false).ConfigureAwait(false);
             }
+
+			[NadekoCommand, Usage, Description, Aliases]
+			[Priority(1)]
+			public async Task dmgroll(string arg)
+			{
+				await InternalDamageRoll(arg, false).ConfigureAwait(false);
+			}
+
+			[NadekoCommand, Usage, Description, Aliases]
+			[Priority(1)]
+			public async Task rоll(string arg)
+			{
+				await RiggedRoll(arg, true).ConfigureAwait(false);
+			}
 
             [NadekoCommand, Usage, Description, Aliases]
             [Priority(0)]
@@ -86,6 +105,8 @@ namespace NadekoBot.Modules.Gambling
             {
                 await InternallDndRoll(arg, false).ConfigureAwait(false);
             }
+
+
 
             private async Task InternalRoll(int num, bool ordered)
             {
@@ -125,28 +146,78 @@ namespace NadekoBot.Modules.Gambling
                     values.Insert(toInsert, randomNumber);
                 }
 
-                using (var bitmap = dice.Merge())
-                using (var ms = bitmap.ToStream())
-                {
-                    foreach (var d in dice)
-                    {
-                        d.Dispose();
-                    }
-
-                    await Context.Channel.SendFileAsync(ms, "dice.png",
-                        Context.User.Mention + " " +
-                        GetText("dice_rolled_num", Format.Bold(values.Count.ToString())) +
-                        " " + GetText("total_average",
-                            Format.Bold(values.Sum().ToString()),
-                            Format.Bold((values.Sum() / (1.0f * values.Count)).ToString("N2")))).ConfigureAwait(false);
-                }
+                var bitmap = dice.Merge();
+                var ms = new MemoryStream();
+                bitmap.SaveAsPng(ms);
+                ms.Position = 0;
+                await Context.Channel.SendFileAsync(ms, "dice.png",
+                    Context.User.Mention +  " " +
+                    GetText("dice_rolled_num", Format.Bold(values.Count.ToString())) +
+                    " " + GetText("total_average",
+                        Format.Bold(values.Sum().ToString()),
+                        Format.Bold((values.Sum() / (1.0f * values.Count)).ToString("N2")))).ConfigureAwait(false);
             }
 
+			private async Task InternalDamageRoll(string arg, bool ordered)
+			{
+				Match match;
+				int n1;
+				int n2;
+				if ((match = fudgeRegex.Match(arg)).Length != 0 &&
+					int.TryParse(match.Groups["n1"].ToString(), out n1) &&
+					n1 > 0 && n1 < 500)
+				{
+					var rng = new NadekoRandom();
+
+					var rolls = new List<char>();
+
+					for (int i = 0; i < n1; i++)
+					{
+						rolls.Add(_fateRolls[rng.Next(0, _fateRolls.Length)]);
+					}
+					var embed = new EmbedBuilder().WithOkColor().WithDescription(Context.User.Mention + " " + GetText("dice_rolled_num", Format.Bold(n1.ToString())))
+						.AddField(efb => efb.WithName(Format.Bold("Result"))
+							.WithValue(string.Join(" ", rolls.Select(c => Format.Code($"[{c}]")))));
+					await Context.Channel.EmbedAsync(embed).ConfigureAwait(false);
+				}
+				else if ((match = dndRegex.Match(arg)).Length != 0)
+				{
+					var rng = new NadekoRandom();
+					if (int.TryParse(match.Groups["n1"].ToString(), out n1) &&
+						int.TryParse(match.Groups["n2"].ToString(), out n2) &&
+						n1 <= 50 && n2 <= 100000 && n1 > 0 && n2 > 0)
+					{
+						var add = 0;
+						var sub = 0;
+						var mul = 1;
+						int.TryParse(match.Groups["add"].Value, out add);
+						int.TryParse(match.Groups["sub"].Value, out sub);
+						int.TryParse(match.Groups["mul"].Value, out mul);
+						var arr = new int[n1];
+						for (int i = 0; i < n1; i++)
+						{
+							arr[i] = rng.Next (1, n2 + 1);
+						}
+
+						var sum = arr.Sum();
+						var embed = new EmbedBuilder ().WithOkColor ().WithDescription (Context.User.Mention + " " + GetText ("dice_rolled_num", n1) +$" `1 - {n2}`")
+							.AddField(efb => efb.WithName(Format.Bold("Rolls"))
+								.WithValue(string.Join(" ", (ordered ? arr.OrderBy(x => x).AsEnumerable() : arr).Select(x => Format.Code(x.ToString())))))
+							.AddField(efb => efb.WithName(Format.Bold("Sum"))
+								.WithValue(sum + " + " + add + " - " + sub + " * " + mul + " = " + ((sum + add - sub))));
+						await Context.Channel.EmbedAsync(embed).ConfigureAwait(false);
+					}
+				}
+			}
+
+		
             private async Task InternallDndRoll(string arg, bool ordered)
             {
                 Match match;
+                int n1;
+                int n2;
                 if ((match = fudgeRegex.Match(arg)).Length != 0 &&
-                    int.TryParse(match.Groups["n1"].ToString(), out int n1) &&
+                    int.TryParse(match.Groups["n1"].ToString(), out n1) &&
                     n1 > 0 && n1 < 500)
                 {
                     var rng = new NadekoRandom();
@@ -166,30 +237,84 @@ namespace NadekoBot.Modules.Gambling
                 {
                     var rng = new NadekoRandom();
                     if (int.TryParse(match.Groups["n1"].ToString(), out n1) &&
-                        int.TryParse(match.Groups["n2"].ToString(), out int n2) &&
+                        int.TryParse(match.Groups["n2"].ToString(), out n2) &&
                         n1 <= 50 && n2 <= 100000 && n1 > 0 && n2 > 0)
                     {
-                        if (!int.TryParse(match.Groups["add"].Value, out int add))
-                            add = 0;
-                        if (!int.TryParse(match.Groups["sub"].Value, out int sub))
-                            sub = 0;
-
+						var add = 0;
+						var sub = 0;
+						var mul = 1;
+						int.TryParse(match.Groups["add"].Value, out add);
+						int.TryParse(match.Groups["sub"].Value, out sub);
+						int.TryParse(match.Groups["mul"].Value, out mul);
                         var arr = new int[n1];
                         for (int i = 0; i < n1; i++)
                         {
                             arr[i] = rng.Next(1, n2 + 1);
                         }
 
-                        var sum = arr.Sum();
-                        var embed = new EmbedBuilder().WithOkColor().WithDescription(Context.User.Mention + " " + GetText("dice_rolled_num", n1) + $"`1 - {n2}`")
-                        .AddField(efb => efb.WithName(Format.Bold("Rolls"))
-                            .WithValue(string.Join(" ", (ordered ? arr.OrderBy(x => x).AsEnumerable() : arr).Select(x => Format.Code(x.ToString())))))
-                        .AddField(efb => efb.WithName(Format.Bold("Sum"))
-                            .WithValue(sum + " + " + add + " - " + sub + " = " + (sum + add - sub)));
-                        await Context.Channel.EmbedAsync(embed).ConfigureAwait(false);
+						var sum = arr.Sum();
+						var embed = new EmbedBuilder ().WithOkColor ().WithDescription (Context.User.Mention + " " + GetText ("dice_rolled_num", n1) +$" ` 1 - {n2}`")
+							.AddField (efb => efb.WithName (Format.Bold ("Rolls"))
+								.WithValue (string.Join (" ", (ordered ? arr.OrderBy (x => x).AsEnumerable () : arr).Select (x => Format.Code ((x + add - sub).ToString ())))))
+							.AddField (efb => efb.WithName (Format.Bold ("Nat"))
+								.WithValue (string.Join (" ", (ordered ? arr.OrderBy (x => x).AsEnumerable () : arr).Select (x => Format.Code (x.ToString ())))));
+						await Context.Channel.EmbedAsync(embed).ConfigureAwait(false);
                     }
                 }
             }
+
+			private async Task RiggedRoll(string arg, bool ordered)
+			{
+				Match match;
+				int n1;
+				int n2;
+				if ((match = fudgeRegex.Match(arg)).Length != 0 &&
+					int.TryParse(match.Groups["n1"].ToString(), out n1) &&
+					n1 > 0 && n1 < 500)
+				{
+					var rng = new NadekoRandom();
+
+					var rolls = new List<char>();
+
+					for (int i = 0; i < n1; i++)
+					{
+						rolls.Add(_fateRolls[rng.Next(0, _fateRolls.Length)]);
+					}
+					var embed = new EmbedBuilder().WithOkColor().WithDescription(Context.User.Mention + " " + GetText("dice_rolled_num", Format.Bold(n1.ToString())))
+						.AddField(efb => efb.WithName(Format.Bold("Result"))
+							.WithValue(string.Join(" ", rolls.Select(c => Format.Code($"[{c}]")))));
+					await Context.Channel.EmbedAsync(embed).ConfigureAwait(false);
+				}
+				else if ((match = dndRegex.Match(arg)).Length != 0)
+				{
+					var rng = new NadekoRandom();
+					if (int.TryParse(match.Groups["n1"].ToString(), out n1) &&
+						int.TryParse(match.Groups["n2"].ToString(), out n2) &&
+						n1 <= 50 && n2 <= 100000 && n1 > 0 && n2 > 0)
+					{
+						var add = 0;
+						var sub = 0;
+						var mul = 1;
+						int.TryParse(match.Groups["add"].Value, out add);
+						int.TryParse(match.Groups["sub"].Value, out sub);
+						int.TryParse(match.Groups["mul"].Value, out mul);
+
+						var arr = new int[n1];
+						for (int i = 0; i < n1; i++)
+						{
+							arr[i] = n2;
+						}
+
+						var sum = arr.Sum();
+						var embed = new EmbedBuilder ().WithOkColor ().WithDescription (Context.User.Mention + " " + GetText ("dice_rolled_num", n1) +$" ` 1 - {n2}`")
+							.AddField (efb => efb.WithName (Format.Bold ("Rolls"))
+								.WithValue (string.Join (" ", (ordered ? arr.OrderBy (x => x).AsEnumerable () : arr).Select (x => Format.Code ((x + add - sub).ToString ())))))
+							.AddField (efb => efb.WithName (Format.Bold ("Nat"))
+								.WithValue (string.Join (" ", (ordered ? arr.OrderBy (x => x).AsEnumerable () : arr).Select (x => Format.Code (x.ToString ())))));
+						await Context.Channel.EmbedAsync(embed).ConfigureAwait(false);
+					}
+				}
+			}
 
             [NadekoCommand, Usage, Description, Aliases]
             public async Task NRoll([Remainder] string range)
@@ -224,13 +349,19 @@ namespace NadekoBot.Modules.Gambling
                 if (num == 10)
                 {
                     var images = _images.Dice;
-                    using (var imgOne = Image.Load(images[1]))
-                    using (var imgZero = Image.Load(images[0]))
+                    using (var imgOneStream = images[1].ToStream())
+                    using (var imgZeroStream = images[0].ToStream())
                     {
+                        var imgOne = Image.Load(imgOneStream);
+                        var imgZero = Image.Load(imgZeroStream);
+
                         return new[] { imgOne, imgZero }.Merge();
                     }
                 }
-                return Image.Load(_images.Dice[num]);
+                using (var die = _images.Dice[num].ToStream())
+                {
+                    return Image.Load(die);
+                }
             }
         }
     }
